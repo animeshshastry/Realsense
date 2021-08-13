@@ -11,12 +11,16 @@
 #include <image_transport/image_transport.h>
 #include <sensor_msgs/image_encodings.h>
 
+#include <opencv2/calib3d.hpp>
+
 // C++ headers
 #include <cmath>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include <execinfo.h>
+
+#include <camera_info_manager/camera_info_manager.h>
 
 // ROS headers
 #include "ros/ros.h"
@@ -214,14 +218,18 @@ try
     auto intrinsics_right = stream_right.get_intrinsics();
     
     // Translate the intrinsics from librealsense into OpenCV
+
+    left_cam_info_msg.header.frame_id = "rs_t265_left_optical_frame";
+    right_cam_info_msg.header.frame_id = "rs_t265_right_optical_frame";
+
     left_cam_info_msg.height = intrinsics_left.height;
     left_cam_info_msg.width = intrinsics_left.width;
 
     right_cam_info_msg.height = intrinsics_right.height;
     right_cam_info_msg.width = intrinsics_right.width;
 
-    left_cam_info_msg.distortion_model = "plum_bob";
-    right_cam_info_msg.distortion_model = "plum_bob";
+    // left_cam_info_msg.distortion_model = "plum_bob";
+    // right_cam_info_msg.distortion_model = "plum_bob";
 
     left_cam_info_msg.distortion_model = "equidistant";
     right_cam_info_msg.distortion_model = "equidistant";
@@ -238,8 +246,20 @@ try
     right_cam_info_msg.D = {intrinsics_right.coeffs[0],intrinsics_right.coeffs[1],intrinsics_right.coeffs[2],
                             intrinsics_right.coeffs[3],intrinsics_right.coeffs[4]};
     
-    auto extrinsics = stream_left.get_extrinsics_to(stream_right);
+    left_cam_info_msg.P = { intrinsics_left.fx, 0,                      intrinsics_left.ppx,    0,
+                            0,                  intrinsics_left.fy,     intrinsics_left.ppy,    0,
+                            0,                  0,                      1,                      0};
+    right_cam_info_msg.P = {    intrinsics_right.fx,    0,                      intrinsics_right.ppx,   0,
+                                0,                      intrinsics_right.fy,    intrinsics_right.ppy,   0,
+                                0,                      0,                      1,                      0};
 
+    left_cam_info_msg.R = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+    right_cam_info_msg.R = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+
+    auto extrinsics = stream_left.get_extrinsics_to(stream_right);
+    auto Rot = extrinsics.rotation;
+    auto Tr = extrinsics.translation;
+    printf(Rot);
 
     // ros::Rate loop_rate(30);
 
@@ -258,7 +278,7 @@ try
     int uniquenessRatio = 10;
     int speckleWindowSize = 100;
     int speckleRange = 32;
-    // auto stereo = cv::StereoSGBM(min_disp, num_disp, blockSize, P1, P2, disp12MaxDiff, uniquenessRatio, speckleWindowSize, speckleRange);
+    auto stereo = cv::StereoSGBM::create(min_disp, num_disp, blockSize, P1, P2, disp12MaxDiff, uniquenessRatio, speckleWindowSize, speckleRange);
 
     // // Main loop
     while (ros::ok())
@@ -269,6 +289,8 @@ try
         }
 
         if (new_frameset){
+
+            auto timestamp = ros::Time::now();
 
             rs2::video_frame f1 = fs.get_fisheye_frame(1);
             rs2::video_frame f2 = fs.get_fisheye_frame(2);
@@ -284,8 +306,16 @@ try
             msg1 = cv_bridge::CvImage(std_msgs::Header(), "mono8", left_image).toImageMsg();
             msg2 = cv_bridge::CvImage(std_msgs::Header(), "mono8", right_image).toImageMsg();
 
+            msg1->header.stamp = timestamp;
+            msg2->header.stamp = timestamp;
+            msg1->header.frame_id = left_cam_info_msg.header.frame_id;
+            msg2->header.frame_id = right_cam_info_msg.header.frame_id;
+
             left_cam_pub.publish(msg1);
             right_cam_pub.publish(msg2);
+
+            left_cam_info_msg.header.stamp = timestamp;
+            right_cam_info_msg.header.stamp = timestamp;
 
             left_cam_info_pub.publish(left_cam_info_msg);
             right_cam_info_pub.publish(right_cam_info_msg);
