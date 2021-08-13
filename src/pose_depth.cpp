@@ -62,8 +62,36 @@ try
     ros::Publisher att_pub = n.advertise<geometry_msgs::Vector3>("/rs_t265/attitude", 1);
 
     image_transport::ImageTransport it(n);
-    image_transport::Publisher left_cam_pub = it.advertise("rs_t265/left_camera", 1);
-    image_transport::Publisher right_cam_pub = it.advertise("rs_t265/right_camera", 1);
+    // image_transport::Publisher left_cam_pub = it.advertise("/rs_t265/fisheye1/image_raw", 1);
+    // image_transport::Publisher right_cam_pub = it.advertise("/rs_t265/fisheye2/image_raw", 1);
+    image_transport::Publisher left_cam_pub = it.advertise("/rs_t265/left/image_raw", 1);
+    image_transport::Publisher right_cam_pub = it.advertise("/rs_t265/right/image_raw", 1);
+
+    // ros::Publisher left_cam_info_pub = n.advertise<sensor_msgs::CameraInfo>("/rs_t265/fisheye1/camera_info", 1);
+    // ros::Publisher right_cam_info_pub = n.advertise<sensor_msgs::CameraInfo>("/rs_t265/fisheye2/camera_info", 1);
+    ros::Publisher left_cam_info_pub = n.advertise<sensor_msgs::CameraInfo>("/rs_t265/left/camera_info", 1);
+    ros::Publisher right_cam_info_pub = n.advertise<sensor_msgs::CameraInfo>("/rs_t265/right/camera_info", 1);
+
+    rs2_pose pose_data;
+    rs2::frameset fs;
+    bool new_pose_frame = false;
+    bool new_frameset = false;
+
+    sensor_msgs::CameraInfo left_cam_info_msg;
+    sensor_msgs::CameraInfo right_cam_info_msg;
+
+    geometry_msgs::Pose pose_msg;
+    geometry_msgs::Twist odom_msg;
+    geometry_msgs::Vector3 attitude_msg;
+
+    double qw, qx, qy, qz;
+    double pitch, roll, yaw;
+
+    double t0, t1, t2, t3, t4, psi, theta, phi;
+
+    tf2::Vector3 v;
+    tf2::Quaternion q;
+    tf2::Matrix3x3 R, C;
 
     // Declare RealSense pipeline, encapsulating the actual device and sensors
     rs2::pipeline pipe;
@@ -96,28 +124,72 @@ try
             last_print = std::chrono::system_clock::now();
         }
 
-        if (auto fp = frame.as<rs2::pose_frame>()) {
-            auto pose_data = frame.as<rs2::pose_frame>().get_pose_data();
+        if (auto pf = frame.as<rs2::pose_frame>()) {
+            pose_data = pf.get_pose_data();
+            new_pose_frame = true;
+
+            q.setW(pose_data.rotation.w);
+            q.setX(pose_data.rotation.x);
+            q.setY(pose_data.rotation.y);
+            q.setZ(pose_data.rotation.z);
+            R.setRotation(q);
+
+            v.setX(pose_data.velocity.x);
+            v.setY(pose_data.velocity.y);
+            v.setZ(pose_data.velocity.z);
+            v = R.transpose()*v;
+
+            C.setEulerYPR(0.0, M_PI/2.0, -M_PI/2.0);
+
+            R *= C;
+            C = C.transpose();
+            C *= R;
+
+            C.getEulerYPR(yaw, pitch, roll);
+
+            odom_msg.linear.x  = -pose_data.translation.z;
+            odom_msg.linear.y  = -pose_data.translation.x;
+            odom_msg.linear.z  = pose_data.translation.y;
+            // odom_msg.angular.x = -pose_data.velocity.z;
+            // odom_msg.angular.y = -pose_data.velocity.x;
+            // odom_msg.angular.z = pose_data.velocity.y;
+
+            // v = C*v;
+
+            odom_msg.angular.x = -v.getZ();
+            odom_msg.angular.y = -v.getX();
+            odom_msg.angular.z = v.getY();
+
+            // qw = pose_data.rotation.w;
+            // qx = pose_data.rotation.x;
+            // qy = pose_data.rotation.y;
+            // qz = pose_data.rotation.z;
+
+            // pitch = -atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy));
+            // yaw = asin(2.0 * (qw * qy - qz * qx));
+            // roll = -atan2(2.0 * (qx * qy + qw * qz), 1.0 - 2.0 * (qy * qy + qz * qz));
+
+            attitude_msg.x = roll;
+            attitude_msg.y = pitch;
+            attitude_msg.z = yaw;
+
+            pose_msg.position.x = -pose_data.translation.z;
+            pose_msg.position.y = -pose_data.translation.x;
+            pose_msg.position.z = pose_data.translation.y;
+
+            pose_msg.orientation.x = -v.getZ();
+            pose_msg.orientation.y = -v.getX();
+            pose_msg.orientation.z = v.getY();
+
+            pose_msg.orientation.w = yaw;
+
+            att_pub.publish(attitude_msg);
+            odom_pub.publish(odom_msg);     
+            pose_pub.publish(pose_msg);
             pose_counter++;
         }
-        else if (auto fs = frame.as<rs2::frameset>()) {
-            rs2::video_frame f1 = fs.get_fisheye_frame(1);
-            rs2::video_frame f2 = fs.get_fisheye_frame(2);
-
-            // Create OpenCV matrix of size (w,h) from the left and right image data
-            cv::Mat left_image(cv::Size(f1.get_width(), f1.get_height()), CV_8UC1, (void*)f1.get_data());
-            cv::Mat right_image(cv::Size(f2.get_width(), f2.get_height()), CV_8UC1, (void*)f2.get_data());
-
-            // cv::imshow("Left_camera",image);
-            // cv::waitKey(1);
-
-            sensor_msgs::ImagePtr msg1, msg2;
-            msg1 = cv_bridge::CvImage(std_msgs::Header(), "mono8", left_image).toImageMsg();
-            msg2 = cv_bridge::CvImage(std_msgs::Header(), "mono8", right_image).toImageMsg();
-
-            left_cam_pub.publish(msg1);
-            right_cam_pub.publish(msg2);
-            
+        else if (fs = frame.as<rs2::frameset>()) {
+            new_frameset = true;
             frame_counter++;
         }
 
@@ -135,27 +207,94 @@ try
 
     pipe.start(cfg, callback);
 
-    // ros::Rate loop_rate(200);
+    auto profiles = pipe.get_active_profile();
+    auto stream_left = profiles.get_stream(RS2_STREAM_FISHEYE, 1).as<rs2::video_stream_profile>();
+    auto stream_right = profiles.get_stream(RS2_STREAM_FISHEYE, 2).as<rs2::video_stream_profile>();
+    auto intrinsics_left = stream_left.get_intrinsics();
+    auto intrinsics_right = stream_right.get_intrinsics();
+    
+    // Translate the intrinsics from librealsense into OpenCV
+    left_cam_info_msg.height = intrinsics_left.height;
+    left_cam_info_msg.width = intrinsics_left.width;
 
-    geometry_msgs::Pose pose_msg;
-    geometry_msgs::Twist odom_msg;
-    geometry_msgs::Vector3 attitude_msg;
+    right_cam_info_msg.height = intrinsics_right.height;
+    right_cam_info_msg.width = intrinsics_right.width;
 
-    double qw, qx, qy, qz;
-    double pitch, roll, yaw;
+    left_cam_info_msg.distortion_model = "plum_bob";
+    right_cam_info_msg.distortion_model = "plum_bob";
 
-    double t0, t1, t2, t3, t4, psi, theta, phi;
+    left_cam_info_msg.distortion_model = "equidistant";
+    right_cam_info_msg.distortion_model = "equidistant";
 
-    tf2::Vector3 v;
-    tf2::Quaternion q;
-    tf2::Matrix3x3 R, C;
+    left_cam_info_msg.K = { intrinsics_left.fx, 0,                      intrinsics_left.ppx,
+                            0,                  intrinsics_left.fy,     intrinsics_left.ppy,
+                            0,                  0,                      1};
+    right_cam_info_msg.K = {    intrinsics_right.fx,    0,                      intrinsics_right.ppx,
+                                0,                      intrinsics_right.fy,    intrinsics_right.ppy,
+                                0,                      0,                      1};
+
+    left_cam_info_msg.D = {intrinsics_left.coeffs[0],intrinsics_left.coeffs[1],intrinsics_left.coeffs[2],
+                            intrinsics_left.coeffs[3],intrinsics_left.coeffs[4]};
+    right_cam_info_msg.D = {intrinsics_right.coeffs[0],intrinsics_right.coeffs[1],intrinsics_right.coeffs[2],
+                            intrinsics_right.coeffs[3],intrinsics_right.coeffs[4]};
+    
+    auto extrinsics = stream_left.get_extrinsics_to(stream_right);
+
+
+    // ros::Rate loop_rate(30);
+
+    // Configure the OpenCV stereo algorithm. See
+    // https://docs.opencv.org/3.4/d2/d85/classcv_1_1StereoSGBM.html for a
+    // description of the parameters
+    int window_size = 5;
+    int min_disp = 0;
+    // must be divisible by 16
+    int num_disp = 112 - min_disp;
+    int max_disp = min_disp + num_disp;
+    int blockSize = 16;
+    int P1 = 8*3*window_size^2;
+    int P2 = 32*3*window_size^2;
+    int disp12MaxDiff = 1;
+    int uniquenessRatio = 10;
+    int speckleWindowSize = 100;
+    int speckleRange = 32;
+    // auto stereo = cv::StereoSGBM(min_disp, num_disp, blockSize, P1, P2, disp12MaxDiff, uniquenessRatio, speckleWindowSize, speckleRange);
 
     // // Main loop
     while (ros::ok())
     {
-        // std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        
+
+        if (new_pose_frame){
+            new_pose_frame = false;
+        }
+
+        if (new_frameset){
+
+            rs2::video_frame f1 = fs.get_fisheye_frame(1);
+            rs2::video_frame f2 = fs.get_fisheye_frame(2);
+
+            // Create OpenCV matrix of size (w,h) from the left and right image data
+            cv::Mat left_image(cv::Size(f1.get_width(), f1.get_height()), CV_8UC1, (void*)f1.get_data());
+            cv::Mat right_image(cv::Size(f2.get_width(), f2.get_height()), CV_8UC1, (void*)f2.get_data());
+
+            // cv::imshow("Left_camera",image);
+            // cv::waitKey(1);
+
+            sensor_msgs::ImagePtr msg1, msg2;
+            msg1 = cv_bridge::CvImage(std_msgs::Header(), "mono8", left_image).toImageMsg();
+            msg2 = cv_bridge::CvImage(std_msgs::Header(), "mono8", right_image).toImageMsg();
+
+            left_cam_pub.publish(msg1);
+            right_cam_pub.publish(msg2);
+
+            left_cam_info_pub.publish(left_cam_info_msg);
+            right_cam_info_pub.publish(right_cam_info_msg);
+
+            new_frameset = false;
+        }
+
         ros::spinOnce();
+        // loop_rate.sleep();
     }
 
     return EXIT_SUCCESS;
@@ -172,6 +311,6 @@ catch (const std::exception& e)
 }
 catch(...)
 {
-    printf("An exception occurred in pose.cpp .\n");
+    printf("An exception occurred in pose_depth.cpp .\n");
     print_trace();
 }
