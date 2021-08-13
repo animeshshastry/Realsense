@@ -32,6 +32,9 @@
 #include <tf2/LinearMath/Matrix3x3.h>
 // #include "std_msgs/Float64.h"
 
+#define PI 3.14159265359
+
+
 /* Obtain a backtrace and print it to stdout. */
 void print_trace (void)
 {
@@ -70,6 +73,8 @@ try
     // image_transport::Publisher right_cam_pub = it.advertise("/rs_t265/fisheye2/image_raw", 1);
     image_transport::Publisher left_cam_pub = it.advertise("/rs_t265/left/image_raw", 1);
     image_transport::Publisher right_cam_pub = it.advertise("/rs_t265/right/image_raw", 1);
+
+    image_transport::Publisher disparity_pub = it.advertise("/rs_t265/disparity", 1);
 
     // ros::Publisher left_cam_info_pub = n.advertise<sensor_msgs::CameraInfo>("/rs_t265/fisheye1/camera_info", 1);
     // ros::Publisher right_cam_info_pub = n.advertise<sensor_msgs::CameraInfo>("/rs_t265/fisheye2/camera_info", 1);
@@ -259,26 +264,126 @@ try
     auto extrinsics = stream_left.get_extrinsics_to(stream_right);
     auto Rot = extrinsics.rotation;
     auto Tr = extrinsics.translation;
-    printf(Rot);
+    tf2::Matrix3x3 Rot_tf;
+    Rot_tf.setValue(Rot[0],Rot[1],Rot[2],Rot[3],Rot[4],Rot[5],Rot[6],Rot[7],Rot[8]);
+    Rot_tf = Rot_tf.transpose();
 
     // ros::Rate loop_rate(30);
 
     // Configure the OpenCV stereo algorithm. See
     // https://docs.opencv.org/3.4/d2/d85/classcv_1_1StereoSGBM.html for a
     // description of the parameters
+
+    // int window_size = 5;
+    // int min_disp = 0;
+    // // must be divisible by 16
+    // int num_disp = 112 - min_disp;
+    // int max_disp = min_disp + num_disp;
+    // int blockSize = 16;
+    // int P1 = 8*3*window_size*window_size;
+    // int P2 = 32*3*window_size*window_size;
+    // int disp12MaxDiff = 1;
+    // int uniquenessRatio = 10;
+    // int speckleWindowSize = 100;
+    // int speckleRange = 32;
+
     int window_size = 5;
     int min_disp = 0;
     // must be divisible by 16
-    int num_disp = 112 - min_disp;
+    int num_disp = 16*4;
     int max_disp = min_disp + num_disp;
-    int blockSize = 16;
-    int P1 = 8*3*window_size^2;
-    int P2 = 32*3*window_size^2;
-    int disp12MaxDiff = 1;
-    int uniquenessRatio = 10;
-    int speckleWindowSize = 100;
-    int speckleRange = 32;
-    auto stereo = cv::StereoSGBM::create(min_disp, num_disp, blockSize, P1, P2, disp12MaxDiff, uniquenessRatio, speckleWindowSize, speckleRange);
+    int blockSize = 21;
+    int P1 = 0;
+    int P2 = 0;
+    int disp12MaxDiff = 0;
+    int uniquenessRatio = 0;
+    int speckleWindowSize = 0;
+    int speckleRange = 0;
+
+    auto stereo = cv::StereoSGBM::create(min_disp, num_disp, blockSize, P1, P2, disp12MaxDiff, uniquenessRatio, speckleWindowSize, speckleRange, cv::StereoSGBM::MODE_HH);
+
+    // We need to determine what focal length our undistorted images should have
+    // in order to set up the camera matrices for initUndistortRectifyMap.  We
+    // could use stereoRectify, but here we show how to derive these projection
+    // matrices from the calibration and a desired height and field of view
+
+    // We calculate the undistorted focal length:
+    //
+    //         h
+    // -----------------
+    //  \      |      /
+    //    \    | f  /
+    //     \   |   /
+    //      \ fov /
+    //        \|/
+    float stereo_fov_rad = 90 * (PI/180);  // 90 degree desired fov
+    int stereo_height_px = 300;          // 300x300 pixel stereo output
+    float stereo_focal_px = stereo_height_px/2 / tan(stereo_fov_rad/2);
+
+    // We set the left rotation to identity and the right rotation
+    // the rotation between the cameras
+    float R_left[9] = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+    float R_right[9] = {Rot[0],Rot[1],Rot[2],Rot[3],Rot[4],Rot[5],Rot[6],Rot[7],Rot[8]};
+    cv::Mat R_left_cv(3,3,CV_32FC1);
+    std::memcpy(R_left_cv.data, R_left, 3*3*sizeof(float));
+    cv::Mat R_right_cv(3,3,CV_32FC1);
+    std::memcpy(R_right_cv.data, R_right, 3*3*sizeof(float));
+
+    // The stereo algorithm needs max_disp extra pixels in order to produce valid
+    // disparity on the desired output region. This changes the width, but the
+    // center of projection should be on the center of the cropped image
+    int stereo_width_px = stereo_height_px + max_disp;
+    cv::Size stereo_size = cv::Size(stereo_width_px, stereo_height_px);
+    float stereo_cx = (stereo_height_px - 1)/2 + max_disp;
+    float stereo_cy = (stereo_height_px - 1)/2;
+
+    // Construct the left and right projection matrices, the only difference is
+    // that the right projection matrix should have a shift along the x axis of
+    // baseline*focal_length
+    float P_left[12] = {stereo_focal_px, 0, stereo_cx, 0,
+                        0, stereo_focal_px, stereo_cy, 0,
+                        0,               0,         1, 0};
+    float P_right[12] = {stereo_focal_px, 0, stereo_cx, 0,
+                        0, stereo_focal_px, stereo_cy, 0,
+                        0,               0,         1, 0};
+    P_right[3] = Tr[0]*stereo_focal_px;
+    
+    cv::Mat P_left_cv(3,4,CV_32FC1);
+    std::memcpy(P_left_cv.data, P_left, 3*4*sizeof(float));
+    cv::Mat P_right_cv(3,4,CV_32FC1);
+    std::memcpy(P_right_cv.data, P_right, 3*4*sizeof(float));
+
+    // Create an undistortion map for the left and right camera which applies the
+    // rectification and undoes the camera distortion. This only has to be done
+    // once
+    int m1type = CV_32FC1;
+
+    float K_left[9] = { intrinsics_left.fx, 0,                      intrinsics_left.ppx,
+                        0,                  intrinsics_left.fy,     intrinsics_left.ppy,
+                        0,                  0,                      1};
+    float K_right[9] = {intrinsics_right.fx,    0,                      intrinsics_right.ppx,
+                        0,                      intrinsics_right.fy,    intrinsics_right.ppy,
+                        0,                      0,                      1};
+    cv::Mat K_left_cv(3, 3, CV_32FC1);
+    std::memcpy(K_left_cv.data, K_left, 3*3*sizeof(float));
+    cv::Mat K_right_cv(3, 3, CV_32FC1);
+    std::memcpy(K_right_cv.data, K_right, 3*3*sizeof(float));
+
+    std::array<float,4> D_left = {intrinsics_left.coeffs[0],intrinsics_left.coeffs[1],intrinsics_left.coeffs[2],intrinsics_left.coeffs[3]};
+    std::array<float,4> D_right = {intrinsics_right.coeffs[0],intrinsics_right.coeffs[1],intrinsics_right.coeffs[2],intrinsics_right.coeffs[3]};
+    // cv::Mat D_left_cv(1, 4, CV_32FC1);
+    // std::memcpy(D_left_cv.data, D_left, 1*4*sizeof(float));
+
+    // std::cout << K_left_cv << '\n';
+    // std::cout << D_left_cv << '\n';
+    // std::cout << R_left_cv << '\n';
+    // std::cout << P_left_cv << '\n';
+
+    cv::Mat lm1, lm2, rm1, rm2;
+    cv::fisheye::initUndistortRectifyMap(K_left_cv, D_left, R_left_cv, P_left_cv, stereo_size, m1type, lm1, lm2);
+    cv::fisheye::initUndistortRectifyMap(K_right_cv, D_right, R_right_cv, P_right_cv, stereo_size, m1type, rm1, rm2);
+    // undistort_rectify = {"left"  : (lm1, lm2),
+                         // "right" : (rm1, rm2)}
 
     // // Main loop
     while (ros::ok())
@@ -292,6 +397,11 @@ try
 
             auto timestamp = ros::Time::now();
 
+            // rs2::frameset fs_cpy;
+            // data_mutex.lock();
+            // fs_cpy = fs;
+            // data_mutex.unlock();
+
             rs2::video_frame f1 = fs.get_fisheye_frame(1);
             rs2::video_frame f2 = fs.get_fisheye_frame(2);
 
@@ -299,12 +409,35 @@ try
             cv::Mat left_image(cv::Size(f1.get_width(), f1.get_height()), CV_8UC1, (void*)f1.get_data());
             cv::Mat right_image(cv::Size(f2.get_width(), f2.get_height()), CV_8UC1, (void*)f2.get_data());
 
-            // cv::imshow("Left_camera",image);
+
+            // Stereo processing block
+            cv::Mat left_image_undistorted, right_image_undistorted;
+            cv::remap( left_image, left_image_undistorted, lm1, lm2, cv::INTER_LINEAR);
+            cv::remap( right_image, right_image_undistorted, rm1, rm2, cv::INTER_LINEAR);
+
+            double maxVal, minVal;
+            cv::Mat disparity, disparity_norm;
+            stereo->compute(left_image_undistorted,right_image_undistorted,disparity);
+
+            // disparity
+
+            // cv::minMaxLoc( disparity, &minVal, &maxVal );
+            // disparity.convertTo( disparity_norm, CV_8UC1, 255/(maxVal - minVal));
+
+            cv::normalize(disparity, disparity_norm, 0, 255, cv::NORM_MINMAX, CV_8UC1);
+
+            sensor_msgs::ImagePtr msg3;
+            msg3 = cv_bridge::CvImage(std_msgs::Header(), "mono8", disparity_norm).toImageMsg();
+            disparity_pub.publish(msg3);
+
+            // cv::imshow("Disparity",disparity_norm);
             // cv::waitKey(1);
 
+
+
             sensor_msgs::ImagePtr msg1, msg2;
-            msg1 = cv_bridge::CvImage(std_msgs::Header(), "mono8", left_image).toImageMsg();
-            msg2 = cv_bridge::CvImage(std_msgs::Header(), "mono8", right_image).toImageMsg();
+            msg1 = cv_bridge::CvImage(std_msgs::Header(), "mono8", left_image_undistorted).toImageMsg();
+            msg2 = cv_bridge::CvImage(std_msgs::Header(), "mono8", right_image_undistorted).toImageMsg();
 
             msg1->header.stamp = timestamp;
             msg2->header.stamp = timestamp;
