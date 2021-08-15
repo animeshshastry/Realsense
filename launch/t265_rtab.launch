@@ -1,0 +1,31 @@
+<launch>
+
+    <arg name="use_rviz"                  default="true"/>
+    <arg name="use_rtabmapviz"            default="false"/>
+
+	<node name="realsense" type="realsense_pose_stereo" pkg="realsense" output="screen" />
+
+    <include file="$(find rtabmap_ros)/launch/rtabmap.launch">
+            <arg name="rtabmap_args"       		value="--delete_db_on_start"/>
+            <arg name="frame_id"           		value="camera_link"/>
+            <arg name="stereo"  				value="true"/>
+            <arg name="approx_sync"  			value="true"/>
+            <arg name="visual_odometry"    		value="false"/>
+            <arg name="odom_topic"         		value="/rs_t265/odom"/>
+            <arg name="left_image_topic"   		value="/rs_t265/left/image_raw"/>
+            <arg name="right_image_topic"  	 	value="/rs_t265/right/image_raw"/>
+            <arg name="left_camera_info_topic"  value="/rs_t265/left/camera_info"/>
+            <arg name="right_camera_info_topic" value="/rs_t265/right/camera_info"/>
+            <arg name="queue_size"         		value="200"/>
+            <arg name="rviz"               		value="$(arg use_rviz)"/>
+            <arg name="rtabmapviz"         		value="$(arg use_rtabmapviz)"/>
+    </include>
+
+	<node pkg="tf2_ros" type="static_transform_publisher" name="link1_broadcaster" args="0.063928 0 0 0 0 0 1 camera_link right_camera_link" />
+
+<!--   	<node pkg="rosserial_server" type="serial_node" name="rosserial_server" output="screen">
+    <param name="port" value="/dev/ttyACM0" />
+  	</node>
+  	<node pkg="rosserial_python" type="message_info_service.py" name="rosserial_message_info" output="screen"/> -->
+
+</launch>
